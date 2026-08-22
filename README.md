@@ -1,94 +1,134 @@
-# EMG Signal Feature Analysis
+# EMG Exercise Form Classification
 
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)]()
-[![Jupyter](https://img.shields.io/badge/Notebook-Jupyter-orange.svg)]()
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-informational.svg)]()
+**Turns raw two-channel surface EMG from a dumbbell press into a Good / Fair / Bad form label, using the
+relationship between the deltoid and pectoral channels rather than either channel alone.**
 
-This repository provides two Jupyter notebooks for EMG analytics:
-- EMG.ipynb: Feature engineering and labeling over time (RMS, skewness, kurtosis, area metrics, differences, scaled scores, Good/Bad labels).
-- EMG_TEST.ipynb: CSV ingestion, cleaning, feature calculation, visualization, and baseline ML scaffolding (scaling, train/test splits, RandomForest/XGBoost/NN optional).
+Research code behind a peer-reviewed conference paper.
 
-## Table of contents
-- Overview
-- Project structure
-- Environment
-- Installation
-- Usage
-- Configuration
-- Expected outputs
-- Troubleshooting
-- License
+> **Status: research notebooks, released as-is.** The two notebooks are the ones used for the
+> experiments, with their cell outputs committed so results are readable without re-running. Best
+> validation accuracy recorded in those outputs is **92.5%**, on a validation split of roughly 80
+> samples. That sample size is small enough that the figure should be read as indicative. See
+> [Current limitations](#current-limitations).
 
-## Overview
-- EMG.ipynb constructs a time-indexed feature set for multiple channels (e.g., deltoid and pectoral), including RMS, skewness, kurtosis, and area metrics, then derives a difference and scaled difference to assign Good/Bad quality labels across the timeline.  
-- EMG_TEST.ipynb demonstrates an end‑to‑end CSV workflow: read signal data (e.g., PRANAV2_256.csv), clean/rename columns, compute RMS and related statistics, visualize trends, and (optionally) run ML baselines with standard scaling and train/test splits.
+---
 
-## Project structure
-- EMG.ipynb — Feature engineering (RMS, skewness, kurtosis), area metrics (del_area, pec_area), diff and scaled difference, Good/Bad labeling, and tabular previews.  
-- EMG_TEST.ipynb — CSV ingestion, preprocessing, feature computation, exploratory plots, and optional ML baseline scaffolding (RandomForest, XGBoost, simple neural nets).  
-- requirements.txt (optional) — If included, install to ensure consistent runtime.
+## The problem
 
-## Environment
-- Python 3.9+ recommended.  
-- Jupyter Notebook or JupyterLab for interactive execution.  
-- Common scientific stack: numpy, pandas, scipy, matplotlib, seaborn, scikit-learn.  
-- Optional: xgboost and tensorflow if running the corresponding ML baseline cells in EMG_TEST.ipynb.
+Judging lifting form from EMG looks like a modelling problem and is mostly a signal problem. A dumbbell
+press recruits the anterior deltoid and the pectoralis together, and bad form usually means the wrong
+one is doing the work. Neither channel alone says much: a high deltoid reading is fine during part of
+the movement and wrong during another. The informative quantity is the *balance* between them over a
+window.
 
-## Installation
-1) Create and activate a virtual environment:
-- python -m venv .venv
-- source .venv/bin/activate    # macOS/Linux
-- .venv\Scripts\activate       # Windows
+So the pipeline spends most of its effort on windowed feature extraction, and the model on top is
+deliberately simple.
 
-2) Install dependencies (choose one):
-- If requirements.txt is present:
-  - pip install -r requirements.txt
-- Minimal setup:
-  - pip install jupyter numpy pandas scipy matplotlib seaborn scikit-learn
-- Optional baselines:
-  - pip install xgboost tensorflow
+---
 
-## Usage
-- Launch Jupyter:
-  - jupyter notebook
-- Open and run EMG.ipynb to:
-  - Load EMG time-series features.
-  - Compute per‑channel RMS, skewness, kurtosis.
-  - Compute area metrics (del_area, pec_area), diff, and scaled_difference.
-  - Generate Good/Bad labels and preview the first/last rows.
-- Open and run EMG_TEST.ipynb to:
-  - Set the CSV path (e.g., PRANAV2_256.csv) in the designated cell.
-  - Clean/rename columns as needed.
-  - Compute RMS and other descriptive features.
-  - Visualize trends (time series, distributions).
-  - Optionally perform train/test splits, scaling, and fit baseline models.
+## Method
 
-## Configuration
-- File paths: Update the CSV file path variable in EMG_TEST.ipynb.  
-- Sampling/windowing: Adjust window sizes for RMS/skewness/kurtosis to match your sampling frequency and analysis needs.  
-- Labeling thresholds: In EMG.ipynb, tune scaled_difference normalization and thresholds to calibrate Good/Bad sensitivity.  
-- Channels: Extend beyond current channels by duplicating feature steps and updating downstream code to include new columns.
+**Signal.** Two channels, deltoid and pectoral, sampled at 256 Hz over 123,072 samples.
 
-## Expected outputs
-- From EMG.ipynb:
-  - A time-indexed feature table with columns similar to:
-    - time, del_area, pec_area, rms_del, rms_pec, skewness_del, skewness_pec, kurtosis_del, kurtosis_pec
-  - A labeled table adding:
-    - diff, scaled_difference, labels (e.g., Good/Bad)
-- From EMG_TEST.ipynb:
-  - A cleaned DataFrame from the CSV with computed features (e.g., RMS columns).
-  - Visualizations for quick inspection of temporal trends and distributions.
-  - Optional baseline metrics from classical models if those cells are executed.
+**Windowed features**, computed per channel over a sliding window:
 
-## Troubleshooting
-- NaNs or misaligned shapes:
-  - Ensure all arrays align on the time index; drop or impute missing values before feature concatenation.  
-- Label imbalance:
-  - Revisit scaled_difference normalization and labeling thresholds; consider robust scaling or percentile‑based thresholds.  
-- Plot errors or missing backends:
-  - Upgrade matplotlib/seaborn and restart the kernel after installing new packages.  
-- ML library issues:
-  - Install xgboost or tensorflow only if running those cells; otherwise comment them out or skip.
+- root mean square, as an activation-magnitude proxy
+- integrated area under the rectified signal, as total work in the window
+- skewness and kurtosis, to capture burst shape rather than just amplitude
+- Wilcoxon amplitude statistics between channels
+
+**Label derivation.** `diff = pec_area - del_area` is min-max scaled, and the scaled difference is
+thresholded into `Good`, `Fair`, and `Bad`. This is a heuristic label, not an expert annotation, which
+matters when reading the accuracy figure: the model is learning to reproduce a threshold rule applied to
+features derived from the same signal.
+
+**Models.** Keras `Sequential` stacks of LSTM and SimpleRNN layers with batch normalization and dropout,
+into a 3-way softmax. Trained for 10 to 30 epochs at batch size 32 with a 0.2 validation split.
+
+Note that these are **recurrent and dense models, not convolutional**. There is no `Conv1D` or `Conv2D`
+anywhere in either notebook.
+
+---
+
+## Results
+
+Taken from the committed cell outputs in `EMG.ipynb`, not from memory:
+
+| Metric | Value |
+|---|---|
+| Best validation accuracy | **0.9250** |
+| Second-best validation accuracy | 0.9125 |
+| Best training accuracy | 0.9054 |
+| Approximate validation set size | ~80 samples |
+
+The validation accuracies quantize on 1/80, which is how the validation set size above was inferred.
+Read the headline number with that in mind: a single sample moves it by 1.25 points.
+
+---
+
+## Files
+
+| File | Contents |
+|---|---|
+| `EMG.ipynb` | Main pipeline: load, window, extract features, label, train, evaluate |
+| `EMG_TEST.ipynb` | Shorter end-to-end pass from raw CSV through cleaning and visual inspection |
+| `EMG_DATASET.csv` | Recorded signal, 123,072 rows |
+| `PRANAV_256.txt` | The same recording in the acquisition tool's raw text format |
+
+---
+
+## Technology stack
+
+Python, TensorFlow / Keras (LSTM, SimpleRNN, BatchNormalization, Dropout), pandas, NumPy,
+SciPy (`skew`, `kurtosis`, `wilcoxon`), scikit-learn (`MinMaxScaler`, `train_test_split`),
+Matplotlib, Seaborn.
+
+---
+
+## Setup
+
+Requires Python 3.9 or newer.
+
+```bash
+git clone https://github.com/patsypppe/EMG-Dumbbell-press.git
+cd EMG-Dumbbell-press
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+jupyter notebook EMG.ipynb
+```
+
+Run the cells top to bottom. `EMG.ipynb` writes two intermediate files into the working directory
+(`GYM_ATTRIBUTES_DATASET.csv` and `preprocessed.csv`) which later cells read back, so cells must be run
+in order.
+
+---
+
+## Current limitations
+
+- **Small validation set.** Roughly 80 samples. Every reported accuracy should be read as indicative
+  rather than precise.
+- **The labels are heuristic, not annotated.** They come from thresholding a min-max scaled feature
+  derived from the same signal the model sees. The task is therefore closer to reproducing a rule than
+  to learning form from ground truth.
+- **The threshold rule has overlapping branches.** In the labelling cell, the first condition
+  `0 < i < 0.4` absorbs everything below 0.4, so the `Fair` branch `0.3 <= i < 0.5` can only ever fire
+  between 0.4 and 0.5. The intended boundaries and the effective ones differ.
+- **Single subject, single session.** The split is not subject-independent, so the numbers say nothing
+  about generalization to a new person.
+- **The two data files are the same recording** in two formats, roughly 8 MB committed twice.
+- **Notebooks carry embedded output images**, which is why `EMG.ipynb` is around 780 KB.
+- **A stray `load_iris` import** is left over from earlier scratch work.
+- **The models are LSTM and SimpleRNN**, so any description of this work as CNN-based is incorrect.
+
+---
+
+## Citation
+
+This work was published at a peer-reviewed IEEE conference. Citation details and DOI are available on
+request or via [LinkedIn](https://www.linkedin.com/in/pranavpattanashetty).
+
+---
 
 ## License
-No license file is included. Add a LICENSE (e.g., MIT or Apache‑2.0) if distributing.
+
+MIT. See [LICENSE](LICENSE).
