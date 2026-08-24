@@ -5,11 +5,11 @@ relationship between the deltoid and pectoral channels rather than either channe
 
 Research code behind a peer-reviewed conference paper.
 
-> **Status: research notebooks, released as-is.** The two notebooks are the ones used for the
-> experiments, with their cell outputs committed so results are readable without re-running. Best
-> validation accuracy recorded in those outputs is **92.5%**, on a validation split of roughly 80
-> samples. That sample size is small enough that the figure should be read as indicative. See
-> [Current limitations](#current-limitations).
+> **Status: research notebooks, released as-is — and the accuracy figures in them do not measure
+> what the title suggests.** The label is a threshold on a quantity that is also handed to the model
+> as an input column, so the task the network is set is to recover a rule it can already see. A
+> three-line `if` on that one column reproduces every label exactly. Read
+> [What these numbers are not](#what-these-numbers-are-not) before quoting anything from here.
 
 ---
 
@@ -38,9 +38,12 @@ deliberately simple.
 - Wilcoxon amplitude statistics between channels
 
 **Label derivation.** `diff = pec_area - del_area` is min-max scaled, and the scaled difference is
-thresholded into `Good`, `Fair`, and `Bad`. This is a heuristic label, not an expert annotation, which
-matters when reading the accuracy figure: the model is learning to reproduce a threshold rule applied to
-features derived from the same signal.
+thresholded into `Good`, `Fair`, and `Bad`. This is a heuristic label, not an expert annotation.
+
+**And the quantity it is thresholded from stays in the feature matrix.** `X = areas_df.iloc[:, :-1]`
+takes every column except the label, which means `scaled_difference` — and `diff`, and the two areas
+that determine both — are all inputs. The target is a deterministic function of the input. This is
+target leakage, and it is the single most important thing to know about every number below.
 
 **Models.** Keras `Sequential` stacks of LSTM and SimpleRNN layers with batch normalization and dropout,
 into a 3-way softmax. Trained for 10 to 30 epochs at batch size 32 with a 0.2 validation split.
@@ -50,19 +53,43 @@ anywhere in either notebook.
 
 ---
 
-## Results
+## What these numbers are not
 
 Taken from the committed cell outputs in `EMG.ipynb`, not from memory:
 
 | Metric | Value |
 |---|---|
-| Best validation accuracy | **0.9250** |
-| Second-best validation accuracy | 0.9125 |
-| Best training accuracy | 0.9054 |
+| Highest validation accuracy recorded | 0.9250 |
+| Lowest validation accuracy recorded | 0.4500 |
+| Distinct `val_accuracy` values in the committed outputs | 10 |
 | Approximate validation set size | ~80 samples |
 
-The validation accuracies quantize on 1/80, which is how the validation set size above was inferred.
-Read the headline number with that in mind: a single sample moves it by 1.25 points.
+Three reasons not to read 0.9250 as a result.
+
+**A three-line rule beats it.** Because `scaled_difference` is an input column and the label is a
+threshold on `scaled_difference`, the label can be recovered exactly without any model:
+
+```python
+rule = np.where((s > 0) & (s < 0.4), 'Bad',
+       np.where((s >= 0.3) & (s < 0.5), 'Fair', 'Good'))   # s = X['scaled_difference']
+# reproduces the labels: 100.00%  (586/586)
+```
+
+A network reported at 0.9250 is scoring *below* a rule it could have learned from one column.
+
+**0.9250 is the maximum over ten recorded runs**, whose values run down to 0.4500. Reporting the
+best of a spread that wide, on a validation set this small, is a selection effect rather than a
+measurement.
+
+**Train and test are not independent.** The sliding window is 6000 samples with a 200-sample hop,
+so consecutive windows overlap by **96.7%**. `train_test_split(..., test_size=0.2, random_state=42)`
+splits those overlapping windows at random, putting near-identical windows on both sides. Even with
+the leakage removed, the held-out score would not measure generalization. A segment-wise or
+subject-wise split is the fix.
+
+The validation accuracies quantize on 1/80, which is how the validation set size was inferred. Running
+the same windowing over the committed `EMG_DATASET.csv` yields 586 windows in total, which is
+consistent with an inner validation split of that size.
 
 ---
 
@@ -97,19 +124,25 @@ pip install -r requirements.txt
 jupyter notebook EMG.ipynb
 ```
 
-Run the cells top to bottom. `EMG.ipynb` writes two intermediate files into the working directory
-(`GYM_ATTRIBUTES_DATASET.csv` and `preprocessed.csv`) which later cells read back, so cells must be run
-in order.
+`EMG.ipynb` cell 0 reads `preprocessed.csv`, which is **not committed and is not written by any cell
+in either notebook** — so a fresh clone cannot run the pipeline as-is. `EMG_DATASET.csv` holds the same
+recording (time, deltoid, pectoral) and can stand in for it; the windowing in cell 0 then produces 586
+windows.
 
 ---
 
 ## Current limitations
 
-- **Small validation set.** Roughly 80 samples. Every reported accuracy should be read as indicative
-  rather than precise.
-- **The labels are heuristic, not annotated.** They come from thresholding a min-max scaled feature
-  derived from the same signal the model sees. The task is therefore closer to reproducing a rule than
-  to learning form from ground truth.
+- **Target leakage.** The column the label is thresholded from is one of the model's inputs. Nothing
+  reported here survives that, and it is not fixable by dropping one column: `diff` and the two area
+  features determine the label just as completely.
+- **There is no independent ground truth.** No one annotated these windows as good or bad form. The
+  labels are a rule applied to the signal, so even a leakage-free model would only be learning the rule.
+  Establishing whether EMG balance predicts form needs labels from outside the signal.
+- **Overlapping windows, random split.** 96.7% overlap between consecutive windows, split at random.
+- **Small validation set.** Roughly 80 samples. One sample moves the figure by 1.25 points.
+- **`preprocessed.csv` is not in the repository.** `EMG.ipynb` cell 0 reads it and no cell in either
+  notebook writes it, so a fresh clone cannot run the pipeline top to bottom as committed.
 - **The threshold rule has overlapping branches.** In the labelling cell, the first condition
   `0 < i < 0.4` absorbs everything below 0.4, so the `Fair` branch `0.3 <= i < 0.5` can only ever fire
   between 0.4 and 0.5. The intended boundaries and the effective ones differ.
